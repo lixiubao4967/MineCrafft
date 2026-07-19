@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>荒野求生 Demo</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #111; color: #eee;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #wrap { position: relative; }
+  canvas { background: #4a7c3c; display: block; border: 2px solid #222; }
+
+  #hud {
+    position: absolute; top: 10px; left: 10px; right: 10px;
+    display: flex; flex-direction: column; gap: 6px;
+    pointer-events: none; user-select: none;
+  }
+  .bar-row { display: flex; align-items: center; gap: 6px; font-size: 13px; text-shadow: 0 1px 2px #000; }
+  .bar-label { width: 56px; }
+  .bar-bg { width: 160px; height: 12px; background: rgba(0,0,0,0.5); border: 1px solid #000; border-radius: 3px; overflow: hidden; }
+  .bar-fill { height: 100%; transition: width 0.2s linear; }
+  #hunger-fill { background: #e0a030; }
+  #thirst-fill { background: #3090e0; }
+  #energy-fill { background: #40c060; }
+  #temp-fill { background: #e05050; }
+  #health-fill { background: #d0203c; }
+
+  #topRight {
+    position: absolute; top: 10px; right: 10px; text-align: right;
+    font-size: 13px; text-shadow: 0 1px 2px #000; pointer-events: none;
+  }
+  #controls {
+    position: absolute; bottom: 10px; left: 10px; font-size: 12px;
+    color: #ccc; text-shadow: 0 1px 2px #000; pointer-events: none;
+  }
+  #gameover {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.75);
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; gap: 12px;
+  }
+  #gameover h1 { margin: 0; font-size: 28px; }
+  #gameover button {
+    padding: 8px 20px; font-size: 15px; cursor: pointer;
+    background: #40c060; border: none; border-radius: 4px; color: #fff;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="900" height="560"></canvas>
+  <div id="hud">
+    <div class="bar-row"><span class="bar-label">饥饿</span><div class="bar-bg"><div id="hunger-fill" class="bar-fill" style="width:100%"></div></div></div>
+    <div class="bar-row"><span class="bar-label">口渴</span><div class="bar-bg"><div id="thirst-fill" class="bar-fill" style="width:100%"></div></div></div>
+    <div class="bar-row"><span class="bar-label">体力</span><div class="bar-bg"><div id="energy-fill" class="bar-fill" style="width:100%"></div></div></div>
+    <div class="bar-row"><span class="bar-label">体温</span><div class="bar-bg"><div id="temp-fill" class="bar-fill" style="width:100%"></div></div></div>
+    <div class="bar-row"><span class="bar-label">生命</span><div class="bar-bg"><div id="health-fill" class="bar-fill" style="width:100%"></div></div></div>
+  </div>
+  <div id="topRight">
+    <div id="dayLabel">第 1 天 · 白天</div>
+    <div id="woodLabel">木材: 0</div>
+    <div id="weaponLabel">武器: 未装备</div>
+    <div id="fenceLabel">围栏: 0</div>
+  </div>
+  <div id="controls">WASD / 方向键 移动　|　E 互动　|　F 攻击</div>
+  <div id="gameover">
+    <h1 id="gameoverTitle">你倒下了</h1>
+    <div id="gameoverReason"></div>
+    <button onclick="location.reload()">重新开始</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// ---------- config ----------
+const DAY_LENGTH = 90; // seconds for a full day/night cycle
+const HUNGER_RATE = 100 / 240;
+const THIRST_RATE = 100 / 180;
+const ENERGY_BASE_RATE = 100 / 300;
+const ENERGY_REGEN_RATE = 100 / 120;
+const FIRE_WARM_RADIUS = 90;
+const INTERACT_RANGE = 60;
+const PLAYER_SPEED = 180; // px/sec
+const MONSTER_SPEED = 85;
+const MONSTER_CONTACT_RANGE = 32;
+const MONSTER_DAMAGE = 15;
+const PLAYER_HIT_INVULN = 1.0;
+const ATTACK_RANGE = 70;
+const ATTACK_COOLDOWN = 0.4;
+const MAX_MONSTERS = 5;
+const FENCE_BLOCK_RADIUS = 34;
+
+// ---------- state ----------
+let time = 0;
+let gameOver = false;
+const stats = { hunger: 100, thirst: 100, energy: 100, temperature: 80, health: 100 };
+let wood = 0;
+let hasWeapon = false;
+let fenceCount = 0;
+let hitCooldown = 0;
+let attackCooldown = 0;
+let monsterSpawnTimer = 5;
+
+const player = { x: 450, y: 420, size: 18 };
+
+const keys = new Set();
+
+const trees = [
+  { x: 700, y: 120 }, { x: 800, y: 300 }, { x: 650, y: 470 }, { x: 120, y: 150 }
+].map(p => ({ ...p, available: true, timer: 0 }));
+
+const bushes = [
+  { x: 400, y: 120 }, { x: 300, y: 420 }, { x: 620, y: 210 }
+].map(p => ({ ...p, available: true, timer: 0 }));
+
+const pond = { x: 150, y: 460, rx: 90, ry: 50 };
+let lastDrink = -999;
+
+const campfire = { x: 470, y: 300, lit: false, fuel: 0 };
+const MAX_FUEL = 30;
+
+const weaponItem = { x: 780, y: 470, picked: false };
+
+const fencePickups = [
+  { x: 60, y: 300 }, { x: 850, y: 150 }, { x: 250, y: 250 }, { x: 560, y: 500 }
+].map(p => ({ ...p, picked: false }));
+
+const fenceSlots = [0, 60, 120, 180, 240, 300].map(deg => {
+  const rad = deg * Math.PI / 180;
+  return { x: campfire.x + Math.cos(rad) * 70, y: campfire.y + Math.sin(rad) * 70, filled: false };
+});
+
+const medkits = [
+  { x: 300, y: 90 }, { x: 700, y: 400 }, { x: 870, y: 420 }
+].map(p => ({ ...p, available: true, timer: 0 }));
+const MEDKIT_HEAL = 40;
+const MEDKIT_RESPAWN = 35;
+
+const monsters = []; // {x,y,hp,flash}
+
+const toasts = []; // {text,x,y,life}
+
+function addToast(text, x, y) {
+  toasts.push({ text, x, y, life: 1.2 });
+}
+
+// ---------- input ----------
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) keys.add(k);
+  if (k === 'e' && !gameOver) tryInteract();
+  if (k === 'f' && !gameOver) tryAttack();
+});
+window.addEventListener('keyup', e => {
+  keys.delete(e.key.toLowerCase());
+});
+
+function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+
+function tryInteract() {
+  // weapon pickup
+  if (!weaponItem.picked && dist(player.x, player.y, weaponItem.x, weaponItem.y) < INTERACT_RANGE) {
+    weaponItem.picked = true;
+    hasWeapon = true;
+    addToast('获得武器！', weaponItem.x, weaponItem.y - 30);
+    return;
+  }
+  // fence pickups
+  for (const f of fencePickups) {
+    if (!f.picked && dist(player.x, player.y, f.x, f.y) < INTERACT_RANGE) {
+      f.picked = true;
+      fenceCount += 1;
+      addToast('+1 围栏', f.x, f.y - 30);
+      return;
+    }
+  }
+  // fence placement (empty slot near campfire)
+  for (const slot of fenceSlots) {
+    if (!slot.filled && dist(player.x, player.y, slot.x, slot.y) < INTERACT_RANGE) {
+      if (fenceCount > 0) {
+        fenceCount -= 1;
+        slot.filled = true;
+        addToast('围栏已放置', slot.x, slot.y - 30);
+      } else {
+        addToast('没有围栏可放置', slot.x, slot.y - 30);
+      }
+      return;
+    }
+  }
+  // campfire first (feed / nothing else)
+  if (dist(player.x, player.y, campfire.x, campfire.y) < INTERACT_RANGE) {
+    if (wood >= 2) {
+      wood -= 2;
+      campfire.fuel = Math.min(MAX_FUEL, campfire.fuel + 20);
+      campfire.lit = true;
+      addToast('+20 燃料', campfire.x, campfire.y - 30);
+    } else {
+      addToast('木材不足', campfire.x, campfire.y - 30);
+    }
+    return;
+  }
+  // trees
+  for (const t of trees) {
+    if (t.available && dist(player.x, player.y, t.x, t.y) < INTERACT_RANGE) {
+      t.available = false;
+      t.timer = 20;
+      wood += 3;
+      addToast('+3 木材', t.x, t.y - 30);
+      return;
+    }
+  }
+  // bushes
+  for (const b of bushes) {
+    if (b.available && dist(player.x, player.y, b.x, b.y) < INTERACT_RANGE) {
+      b.available = false;
+      b.timer = 25;
+      stats.hunger = Math.min(100, stats.hunger + 20);
+      addToast('+20 饥饿', b.x, b.y - 30);
+      return;
+    }
+  }
+  // medkits
+  for (const m of medkits) {
+    if (m.available && dist(player.x, player.y, m.x, m.y) < INTERACT_RANGE) {
+      m.available = false;
+      m.timer = MEDKIT_RESPAWN;
+      stats.health = Math.min(100, stats.health + MEDKIT_HEAL);
+      addToast(`+${MEDKIT_HEAL} 生命`, m.x, m.y - 30);
+      return;
+    }
+  }
+  // pond
+  if (dist(player.x, player.y, pond.x, pond.y) < INTERACT_RANGE + 30) {
+    if (time - lastDrink > 1.0) {
+      lastDrink = time;
+      stats.thirst = Math.min(100, stats.thirst + 25);
+      addToast('+25 口渴', pond.x, pond.y - 60);
+    }
+    return;
+  }
+}
+
+function tryAttack() {
+  if (attackCooldown > 0) return;
+  if (!hasWeapon) {
+    addToast('需要先找到武器', player.x, player.y - 40);
+    return;
+  }
+  let target = null, best = Infinity;
+  for (const m of monsters) {
+    const d = dist(player.x, player.y, m.x, m.y);
+    if (d < ATTACK_RANGE && d < best) { best = d; target = m; }
+  }
+  attackCooldown = ATTACK_COOLDOWN;
+  if (!target) return;
+  target.hp -= 1;
+  target.flash = 0.15;
+  if (target.hp <= 0) {
+    monsters.splice(monsters.indexOf(target), 1);
+    addToast('击败了怪物！', target.x, target.y - 30);
+  } else {
+    addToast('击中！', target.x, target.y - 30);
+  }
+}
+
+function spawnMonster() {
+  const edge = Math.floor(Math.random() * 4);
+  let x, y;
+  if (edge === 0) { x = Math.random() * W; y = 55; }
+  else if (edge === 1) { x = Math.random() * W; y = H - 20; }
+  else if (edge === 2) { x = 20; y = 55 + Math.random() * (H - 75); }
+  else { x = W - 20; y = 55 + Math.random() * (H - 75); }
+  monsters.push({ x, y, hp: 3, flash: 0 });
+}
+
+// ---------- update ----------
+function ambientTemp() {
+  const phase = (time % DAY_LENGTH) / DAY_LENGTH;
+  const daylight = (Math.sin(phase * Math.PI * 2 - Math.PI / 2) + 1) / 2; // 0..1
+  return { temp: 25 + daylight * 50, daylight };
+}
+
+function update(dt) {
+  time += dt;
+
+  // resource respawns
+  for (const t of trees) {
+    if (!t.available) { t.timer -= dt; if (t.timer <= 0) t.available = true; }
+  }
+  for (const b of bushes) {
+    if (!b.available) { b.timer -= dt; if (b.timer <= 0) b.available = true; }
+  }
+  for (const m of medkits) {
+    if (!m.available) { m.timer -= dt; if (m.timer <= 0) m.available = true; }
+  }
+
+  // campfire fuel
+  if (campfire.lit) {
+    campfire.fuel -= dt;
+    if (campfire.fuel <= 0) { campfire.fuel = 0; campfire.lit = false; }
+  }
+
+  // cooldowns
+  if (hitCooldown > 0) hitCooldown -= dt;
+  if (attackCooldown > 0) attackCooldown -= dt;
+
+  // monster spawning (night only)
+  const { daylight: dl } = ambientTemp();
+  if (dl <= 0.5) {
+    monsterSpawnTimer -= dt;
+    if (monsterSpawnTimer <= 0) {
+      monsterSpawnTimer = 10;
+      if (monsters.length < MAX_MONSTERS) spawnMonster();
+    }
+  } else {
+    monsterSpawnTimer = 3; // primed so a monster can appear shortly after nightfall
+  }
+
+  // monster movement + contact damage
+  for (const m of monsters) {
+    if (m.flash > 0) m.flash -= dt;
+    const d = dist(player.x, player.y, m.x, m.y);
+    let nx = m.x, ny = m.y;
+    if (d > 1) {
+      nx += (player.x - m.x) / d * MONSTER_SPEED * dt;
+      ny += (player.y - m.y) / d * MONSTER_SPEED * dt;
+    }
+    // fences block movement into their radius
+    for (const slot of fenceSlots) {
+      if (!slot.filled) continue;
+      const sd = dist(nx, ny, slot.x, slot.y);
+      if (sd < FENCE_BLOCK_RADIUS) {
+        const ang = Math.atan2(ny - slot.y, nx - slot.x);
+        nx = slot.x + Math.cos(ang) * FENCE_BLOCK_RADIUS;
+        ny = slot.y + Math.sin(ang) * FENCE_BLOCK_RADIUS;
+      }
+    }
+    m.x = nx; m.y = ny;
+    const dPlayer = dist(player.x, player.y, m.x, m.y);
+    if (dPlayer < MONSTER_CONTACT_RANGE && hitCooldown <= 0) {
+      stats.health -= MONSTER_DAMAGE;
+      hitCooldown = PLAYER_HIT_INVULN;
+      addToast(`-${MONSTER_DAMAGE} 生命`, player.x, player.y - 40);
+    }
+  }
+
+  // movement
+  let dx = 0, dy = 0;
+  if (keys.has('w') || keys.has('arrowup')) dy -= 1;
+  if (keys.has('s') || keys.has('arrowdown')) dy += 1;
+  if (keys.has('a') || keys.has('arrowleft')) dx -= 1;
+  if (keys.has('d') || keys.has('arrowright')) dx += 1;
+  if (dx !== 0 || dy !== 0) {
+    const len = Math.hypot(dx, dy);
+    player.x += (dx / len) * PLAYER_SPEED * dt;
+    player.y += (dy / len) * PLAYER_SPEED * dt;
+    player.x = Math.max(20, Math.min(W - 20, player.x));
+    player.y = Math.max(60, Math.min(H - 20, player.y));
+  }
+
+  // temperature drift
+  const { temp: ambient } = ambientTemp();
+  const nearFire = campfire.lit && dist(player.x, player.y, campfire.x, campfire.y) < FIRE_WARM_RADIUS;
+  const target = nearFire ? 95 : ambient;
+  const lerpRate = nearFire ? 1.1 : 0.15;
+  stats.temperature += (target - stats.temperature) * Math.min(1, lerpRate * dt);
+
+  // hunger / thirst
+  stats.hunger -= HUNGER_RATE * dt;
+  stats.thirst -= THIRST_RATE * dt;
+
+  // energy
+  let energyRate = ENERGY_BASE_RATE;
+  if (stats.hunger < 20 || stats.thirst < 20) energyRate *= 2;
+  if (stats.temperature < 25) energyRate *= 2;
+  if (nearFire) {
+    stats.energy += ENERGY_REGEN_RATE * dt;
+  } else {
+    stats.energy -= energyRate * dt;
+  }
+
+  // clamp
+  stats.hunger = Math.max(0, Math.min(100, stats.hunger));
+  stats.thirst = Math.max(0, Math.min(100, stats.thirst));
+  stats.energy = Math.max(0, Math.min(100, stats.energy));
+  stats.temperature = Math.max(0, Math.min(100, stats.temperature));
+  stats.health = Math.max(0, Math.min(100, stats.health));
+
+  // toasts
+  for (const t of toasts) { t.life -= dt; t.y -= dt * 15; }
+  for (let i = toasts.length - 1; i >= 0; i--) if (toasts[i].life <= 0) toasts.splice(i, 1);
+
+  // game over checks
+  if (stats.hunger <= 0) return endGame('你被活活饿死了');
+  if (stats.thirst <= 0) return endGame('你渴死了');
+  if (stats.temperature <= 0) return endGame('你被冻死了');
+  if (stats.energy <= 0) return endGame('你力竭倒下，再也没有起来');
+  if (stats.health <= 0) return endGame('你被怪物杀死了');
+}
+
+function endGame(reason) {
+  gameOver = true;
+  const day = Math.floor(time / DAY_LENGTH) + 1;
+  document.getElementById('gameoverReason').textContent = `${reason} —— 你存活了 ${day} 天`;
+  document.getElementById('gameover').style.display = 'flex';
+}
+
+// ---------- render ----------
+function drawResource(emoji, x, y, size = 34) {
+  ctx.font = `${size}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(emoji, x, y);
+}
+
+function nearestInteractable() {
+  if (!weaponItem.picked && dist(player.x, player.y, weaponItem.x, weaponItem.y) < INTERACT_RANGE)
+    return { x: weaponItem.x, y: weaponItem.y - 40, text: '[E] 拾取武器' };
+  for (const f of fencePickups) if (!f.picked && dist(player.x, player.y, f.x, f.y) < INTERACT_RANGE)
+    return { x: f.x, y: f.y - 40, text: '[E] 拾取围栏' };
+  for (const slot of fenceSlots) if (!slot.filled && dist(player.x, player.y, slot.x, slot.y) < INTERACT_RANGE)
+    return { x: slot.x, y: slot.y - 40, text: fenceCount > 0 ? '[E] 放置围栏' : '[E] 放置围栏 (无围栏)' };
+  if (dist(player.x, player.y, campfire.x, campfire.y) < INTERACT_RANGE)
+    return { x: campfire.x, y: campfire.y - 40, text: wood >= 2 ? '[E] 添柴 (需要2木材)' : '[E] 添柴 (木材不足)' };
+  for (const t of trees) if (t.available && dist(player.x, player.y, t.x, t.y) < INTERACT_RANGE)
+    return { x: t.x, y: t.y - 40, text: '[E] 砍树取材' };
+  for (const b of bushes) if (b.available && dist(player.x, player.y, b.x, b.y) < INTERACT_RANGE)
+    return { x: b.x, y: b.y - 40, text: '[E] 采摘浆果' };
+  for (const m of medkits) if (m.available && dist(player.x, player.y, m.x, m.y) < INTERACT_RANGE)
+    return { x: m.x, y: m.y - 40, text: '[E] 使用医疗包' };
+  if (dist(player.x, player.y, pond.x, pond.y) < INTERACT_RANGE + 30)
+    return { x: pond.x, y: pond.y - 70, text: '[E] 喝水' };
+  return null;
+}
+
+function render() {
+  const { daylight } = ambientTemp();
+
+  // background
+  const skyTone = daylight; // 0 night .. 1 day
+  const r = Math.round(30 + skyTone * 45);
+  const g = Math.round(60 + skyTone * 65);
+  const b = Math.round(35 + skyTone * 25);
+  ctx.fillStyle = `rgb(${r},${g},${b})`;
+  ctx.fillRect(0, 0, W, H);
+
+  // pond
+  ctx.fillStyle = '#2b6fb0';
+  ctx.beginPath();
+  ctx.ellipse(pond.x, pond.y, pond.rx, pond.ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+  drawResource('💧', pond.x, pond.y, 28);
+
+  // trees
+  for (const t of trees) drawResource(t.available ? '🌳' : '🪵', t.x, t.y);
+  // bushes
+  for (const b of bushes) drawResource(b.available ? '🫐' : '🌿', b.x, b.y);
+  // medkits
+  for (const m of medkits) if (m.available) drawResource('🩹', m.x, m.y, 30);
+  // fence slots (draw before campfire so the fire sits on top visually)
+  for (const slot of fenceSlots) if (slot.filled) drawResource('🚧', slot.x, slot.y, 28);
+
+  // campfire
+  drawResource(campfire.lit ? '🔥' : '🪵', campfire.x, campfire.y, 38);
+
+  // weapon item
+  if (!weaponItem.picked) drawResource('🗡️', weaponItem.x, weaponItem.y);
+
+  // fence pickups
+  for (const f of fencePickups) if (!f.picked) drawResource('🚧', f.x, f.y, 30);
+
+  // monsters
+  for (const m of monsters) {
+    if (m.flash > 0) {
+      ctx.fillStyle = 'rgba(255,0,0,0.35)';
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, 22, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    drawResource('👹', m.x, m.y, 32);
+  }
+
+  // player
+  drawResource('🧍', player.x, player.y, 32);
+  if (hasWeapon) drawResource('🗡️', player.x + 20, player.y + 8, 18);
+
+  // interaction prompt
+  const near = nearestInteractable();
+  if (near) {
+    ctx.fillStyle = '#fff';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(near.text, near.x, near.y);
+  }
+
+  // toasts
+  ctx.font = '16px sans-serif';
+  ctx.textAlign = 'center';
+  for (const t of toasts) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, t.life));
+    ctx.fillStyle = '#fff';
+    ctx.fillText(t.text, t.x, t.y);
+    ctx.globalAlpha = 1;
+  }
+
+  // night darkening overlay
+  const darkness = (1 - skyTone) * 0.45;
+  if (darkness > 0.01) {
+    ctx.fillStyle = `rgba(0,0,10,${darkness})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // HUD text
+  document.getElementById('hunger-fill').style.width = stats.hunger + '%';
+  document.getElementById('thirst-fill').style.width = stats.thirst + '%';
+  document.getElementById('energy-fill').style.width = stats.energy + '%';
+  document.getElementById('temp-fill').style.width = stats.temperature + '%';
+  document.getElementById('health-fill').style.width = stats.health + '%';
+  const day = Math.floor(time / DAY_LENGTH) + 1;
+  document.getElementById('dayLabel').textContent = `第 ${day} 天 · ${skyTone > 0.5 ? '白天' : '夜晚'}`;
+  document.getElementById('woodLabel').textContent = `木材: ${wood}`;
+  document.getElementById('weaponLabel').textContent = `武器: ${hasWeapon ? '已装备' : '未装备'}`;
+  document.getElementById('fenceLabel').textContent = `围栏: ${fenceCount}`;
+}
+
+// ---------- loop ----------
+let last = null;
+function loop(ts) {
+  if (last === null) last = ts;
+  let dt = (ts - last) / 1000;
+  dt = Math.min(dt, 0.1);
+  last = ts;
+
+  if (!gameOver) update(dt);
+  render();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
