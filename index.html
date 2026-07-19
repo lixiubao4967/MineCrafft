@@ -60,11 +60,13 @@
   </div>
   <div id="topRight">
     <div id="dayLabel">第 1 天 · 白天</div>
+    <div id="phaseTimerLabel">距离夜晚: 300秒</div>
     <div id="woodLabel">木材: 0</div>
     <div id="weaponLabel">武器: 未装备</div>
+    <div id="fireballLabel">火球魔法书: 未获得</div>
     <div id="fenceLabel">围栏: 0</div>
   </div>
-  <div id="controls">WASD / 方向键 移动　|　E 互动　|　F 攻击</div>
+  <div id="controls">WASD / 方向键 移动　|　E 互动　|　F 攻击　|　R 火球</div>
   <div id="gameover">
     <h1 id="gameoverTitle">你倒下了</h1>
     <div id="gameoverReason"></div>
@@ -78,7 +80,9 @@ const ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;
 
 // ---------- config ----------
-const DAY_LENGTH = 90; // seconds for a full day/night cycle
+const DAY_DURATION = 300; // seconds of daylight per cycle
+const NIGHT_DURATION = 120; // seconds of night per cycle
+const CYCLE_LENGTH = DAY_DURATION + NIGHT_DURATION;
 const HUNGER_RATE = 100 / 240;
 const THIRST_RATE = 100 / 180;
 const ENERGY_BASE_RATE = 100 / 300;
@@ -94,6 +98,10 @@ const ATTACK_RANGE = 70;
 const ATTACK_COOLDOWN = 0.4;
 const MAX_MONSTERS = 5;
 const FENCE_BLOCK_RADIUS = 34;
+const FIREBALL_COOLDOWN = 1.5;
+const FIREBALL_SPEED = 260; // px/sec
+const FIREBALL_DAMAGE = 2;
+const FIREBALL_HIT_RANGE = 20;
 
 // ---------- state ----------
 let time = 0;
@@ -101,9 +109,11 @@ let gameOver = false;
 const stats = { hunger: 100, thirst: 100, energy: 100, temperature: 80, health: 100 };
 let wood = 0;
 let hasWeapon = false;
+let hasFireball = false;
 let fenceCount = 0;
 let hitCooldown = 0;
 let attackCooldown = 0;
+let fireballCooldown = 0;
 let monsterSpawnTimer = 5;
 
 const player = { x: 450, y: 420, size: 18 };
@@ -125,6 +135,8 @@ const campfire = { x: 470, y: 300, lit: false, fuel: 0 };
 const MAX_FUEL = 30;
 
 const weaponItem = { x: 780, y: 470, picked: false };
+const spellbookItem = { x: 200, y: 300, picked: false };
+const fireballs = []; // {x,y,target}
 
 const fencePickups = [
   { x: 60, y: 300 }, { x: 850, y: 150 }, { x: 250, y: 250 }, { x: 560, y: 500 }
@@ -155,6 +167,7 @@ window.addEventListener('keydown', e => {
   if (['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) keys.add(k);
   if (k === 'e' && !gameOver) tryInteract();
   if (k === 'f' && !gameOver) tryAttack();
+  if (k === 'r' && !gameOver) tryCastFireball();
 });
 window.addEventListener('keyup', e => {
   keys.delete(e.key.toLowerCase());
@@ -168,6 +181,13 @@ function tryInteract() {
     weaponItem.picked = true;
     hasWeapon = true;
     addToast('获得武器！', weaponItem.x, weaponItem.y - 30);
+    return;
+  }
+  // spellbook pickup
+  if (!spellbookItem.picked && dist(player.x, player.y, spellbookItem.x, spellbookItem.y) < INTERACT_RANGE) {
+    spellbookItem.picked = true;
+    hasFireball = true;
+    addToast('获得火球魔法书！', spellbookItem.x, spellbookItem.y - 30);
     return;
   }
   // fence pickups
@@ -268,6 +288,30 @@ function tryAttack() {
   }
 }
 
+function nearestMonster(x, y) {
+  let target = null, best = Infinity;
+  for (const m of monsters) {
+    const d = dist(x, y, m.x, m.y);
+    if (d < best) { best = d; target = m; }
+  }
+  return target;
+}
+
+function tryCastFireball() {
+  if (!hasFireball) {
+    addToast('需要先获得火球魔法书', player.x, player.y - 40);
+    return;
+  }
+  if (fireballCooldown > 0) return;
+  const target = nearestMonster(player.x, player.y);
+  if (!target) {
+    addToast('附近没有目标', player.x, player.y - 40);
+    return;
+  }
+  fireballCooldown = FIREBALL_COOLDOWN;
+  fireballs.push({ x: player.x, y: player.y, target });
+}
+
 function spawnMonster() {
   const edge = Math.floor(Math.random() * 4);
   let x, y;
@@ -279,14 +323,30 @@ function spawnMonster() {
 }
 
 // ---------- update ----------
+function dayNightInfo() {
+  const phaseTime = time % CYCLE_LENGTH;
+  const isDay = phaseTime < DAY_DURATION;
+  const daylight = isDay ? Math.sin((phaseTime / DAY_DURATION) * Math.PI) : 0; // 0..1, 0 all night
+  const timeLeft = isDay ? DAY_DURATION - phaseTime : CYCLE_LENGTH - phaseTime;
+  const dayCount = Math.floor(time / CYCLE_LENGTH) + 1;
+  return { daylight, isDay, timeLeft, dayCount };
+}
+
 function ambientTemp() {
-  const phase = (time % DAY_LENGTH) / DAY_LENGTH;
-  const daylight = (Math.sin(phase * Math.PI * 2 - Math.PI / 2) + 1) / 2; // 0..1
+  const { daylight } = dayNightInfo();
   return { temp: 25 + daylight * 50, daylight };
 }
 
+let lastIsDay = true;
+
 function update(dt) {
   time += dt;
+
+  const { isDay } = dayNightInfo();
+  if (isDay !== lastIsDay) {
+    addToast(isDay ? '天亮了' : '夜幕降临', player.x, player.y - 50);
+    lastIsDay = isDay;
+  }
 
   // resource respawns
   for (const t of trees) {
@@ -308,10 +368,34 @@ function update(dt) {
   // cooldowns
   if (hitCooldown > 0) hitCooldown -= dt;
   if (attackCooldown > 0) attackCooldown -= dt;
+  if (fireballCooldown > 0) fireballCooldown -= dt;
+
+  // fireballs (home in on their locked target)
+  for (let i = fireballs.length - 1; i >= 0; i--) {
+    const fb = fireballs[i];
+    if (!monsters.includes(fb.target)) {
+      fb.target = nearestMonster(fb.x, fb.y);
+      if (!fb.target) { fireballs.splice(i, 1); continue; }
+    }
+    const d = dist(fb.x, fb.y, fb.target.x, fb.target.y);
+    if (d < FIREBALL_HIT_RANGE) {
+      fb.target.hp -= FIREBALL_DAMAGE;
+      fb.target.flash = 0.15;
+      if (fb.target.hp <= 0) {
+        monsters.splice(monsters.indexOf(fb.target), 1);
+        addToast('火球击败了怪物！', fb.target.x, fb.target.y - 30);
+      } else {
+        addToast('火球命中！', fb.target.x, fb.target.y - 30);
+      }
+      fireballs.splice(i, 1);
+      continue;
+    }
+    fb.x += (fb.target.x - fb.x) / d * FIREBALL_SPEED * dt;
+    fb.y += (fb.target.y - fb.y) / d * FIREBALL_SPEED * dt;
+  }
 
   // monster spawning (night only)
-  const { daylight: dl } = ambientTemp();
-  if (dl <= 0.5) {
+  if (!isDay) {
     monsterSpawnTimer -= dt;
     if (monsterSpawnTimer <= 0) {
       monsterSpawnTimer = 10;
@@ -405,8 +489,8 @@ function update(dt) {
 
 function endGame(reason) {
   gameOver = true;
-  const day = Math.floor(time / DAY_LENGTH) + 1;
-  document.getElementById('gameoverReason').textContent = `${reason} —— 你存活了 ${day} 天`;
+  const { dayCount } = dayNightInfo();
+  document.getElementById('gameoverReason').textContent = `${reason} —— 你存活了 ${dayCount} 天`;
   document.getElementById('gameover').style.display = 'flex';
 }
 
@@ -421,6 +505,8 @@ function drawResource(emoji, x, y, size = 34) {
 function nearestInteractable() {
   if (!weaponItem.picked && dist(player.x, player.y, weaponItem.x, weaponItem.y) < INTERACT_RANGE)
     return { x: weaponItem.x, y: weaponItem.y - 40, text: '[E] 拾取武器' };
+  if (!spellbookItem.picked && dist(player.x, player.y, spellbookItem.x, spellbookItem.y) < INTERACT_RANGE)
+    return { x: spellbookItem.x, y: spellbookItem.y - 40, text: '[E] 拾取火球魔法书' };
   for (const f of fencePickups) if (!f.picked && dist(player.x, player.y, f.x, f.y) < INTERACT_RANGE)
     return { x: f.x, y: f.y - 40, text: '[E] 拾取围栏' };
   for (const slot of fenceSlots) if (!slot.filled && dist(player.x, player.y, slot.x, slot.y) < INTERACT_RANGE)
@@ -471,6 +557,9 @@ function render() {
   // weapon item
   if (!weaponItem.picked) drawResource('🗡️', weaponItem.x, weaponItem.y);
 
+  // spellbook item
+  if (!spellbookItem.picked) drawResource('📙', spellbookItem.x, spellbookItem.y);
+
   // fence pickups
   for (const f of fencePickups) if (!f.picked) drawResource('🚧', f.x, f.y, 30);
 
@@ -485,9 +574,19 @@ function render() {
     drawResource('👹', m.x, m.y, 32);
   }
 
+  // fireballs
+  for (const fb of fireballs) {
+    ctx.fillStyle = 'rgba(255,140,0,0.35)';
+    ctx.beginPath();
+    ctx.arc(fb.x, fb.y, 14, 0, Math.PI * 2);
+    ctx.fill();
+    drawResource('🔥', fb.x, fb.y, 22);
+  }
+
   // player
   drawResource('🧍', player.x, player.y, 32);
   if (hasWeapon) drawResource('🗡️', player.x + 20, player.y + 8, 18);
+  if (hasFireball) drawResource('📙', player.x - 20, player.y + 8, 16);
 
   // interaction prompt
   const near = nearestInteractable();
@@ -521,10 +620,13 @@ function render() {
   document.getElementById('energy-fill').style.width = stats.energy + '%';
   document.getElementById('temp-fill').style.width = stats.temperature + '%';
   document.getElementById('health-fill').style.width = stats.health + '%';
-  const day = Math.floor(time / DAY_LENGTH) + 1;
-  document.getElementById('dayLabel').textContent = `第 ${day} 天 · ${skyTone > 0.5 ? '白天' : '夜晚'}`;
+  const { isDay, timeLeft, dayCount } = dayNightInfo();
+  const secLeft = Math.ceil(timeLeft);
+  document.getElementById('dayLabel').textContent = `第 ${dayCount} 天 · ${isDay ? '白天' : '夜晚'}`;
+  document.getElementById('phaseTimerLabel').textContent = isDay ? `距离夜晚: ${secLeft}秒` : `距离白天: ${secLeft}秒`;
   document.getElementById('woodLabel').textContent = `木材: ${wood}`;
   document.getElementById('weaponLabel').textContent = `武器: ${hasWeapon ? '已装备' : '未装备'}`;
+  document.getElementById('fireballLabel').textContent = `火球魔法书: ${hasFireball ? '已获得' : '未获得'}`;
   document.getElementById('fenceLabel').textContent = `围栏: ${fenceCount}`;
 }
 
