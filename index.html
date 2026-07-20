@@ -65,6 +65,7 @@
     <div id="weaponLabel">武器: 未装备</div>
     <div id="fireballLabel">火球魔法书: 未获得</div>
     <div id="fenceLabel">围栏: 0</div>
+    <div id="spikeLabel">地刺: 0</div>
   </div>
   <div id="controls">WASD / 方向键 移动　|　E 互动　|　F 攻击　|　R 火球</div>
   <div id="gameover">
@@ -102,6 +103,9 @@ const FIREBALL_COOLDOWN = 1.5;
 const FIREBALL_SPEED = 260; // px/sec
 const FIREBALL_DAMAGE = 2;
 const FIREBALL_HIT_RANGE = 20;
+const SPIKE_RADIUS = 30;
+const SPIKE_DAMAGE = 1;
+const SPIKE_TICK = 0.6; // seconds between damage ticks per monster
 
 // ---------- state ----------
 let time = 0;
@@ -111,6 +115,7 @@ let wood = 0;
 let hasWeapon = false;
 let hasFireball = false;
 let fenceCount = 0;
+let spikeCount = 0;
 let hitCooldown = 0;
 let attackCooldown = 0;
 let fireballCooldown = 0;
@@ -145,6 +150,15 @@ const fencePickups = [
 const fenceSlots = [0, 60, 120, 180, 240, 300].map(deg => {
   const rad = deg * Math.PI / 180;
   return { x: campfire.x + Math.cos(rad) * 70, y: campfire.y + Math.sin(rad) * 70, filled: false };
+});
+
+const spikePickups = [
+  { x: 830, y: 90 }, { x: 40, y: 420 }, { x: 650, y: 550 }, { x: 470, y: 90 }
+].map(p => ({ ...p, picked: false }));
+
+const spikeSlots = [30, 90, 150, 210, 270, 330].map(deg => {
+  const rad = deg * Math.PI / 180;
+  return { x: campfire.x + Math.cos(rad) * 100, y: campfire.y + Math.sin(rad) * 100, filled: false };
 });
 
 const medkits = [
@@ -199,6 +213,15 @@ function tryInteract() {
       return;
     }
   }
+  // spike pickups
+  for (const s of spikePickups) {
+    if (!s.picked && dist(player.x, player.y, s.x, s.y) < INTERACT_RANGE) {
+      s.picked = true;
+      spikeCount += 1;
+      addToast('+1 地刺', s.x, s.y - 30);
+      return;
+    }
+  }
   // fence placement (empty slot near campfire)
   for (const slot of fenceSlots) {
     if (!slot.filled && dist(player.x, player.y, slot.x, slot.y) < INTERACT_RANGE) {
@@ -208,6 +231,19 @@ function tryInteract() {
         addToast('围栏已放置', slot.x, slot.y - 30);
       } else {
         addToast('没有围栏可放置', slot.x, slot.y - 30);
+      }
+      return;
+    }
+  }
+  // spike placement (empty slot near campfire)
+  for (const slot of spikeSlots) {
+    if (!slot.filled && dist(player.x, player.y, slot.x, slot.y) < INTERACT_RANGE) {
+      if (spikeCount > 0) {
+        spikeCount -= 1;
+        slot.filled = true;
+        addToast('地刺已放置', slot.x, slot.y - 30);
+      } else {
+        addToast('没有地刺可放置', slot.x, slot.y - 30);
       }
       return;
     }
@@ -319,7 +355,7 @@ function spawnMonster() {
   else if (edge === 1) { x = Math.random() * W; y = H - 20; }
   else if (edge === 2) { x = 20; y = 55 + Math.random() * (H - 75); }
   else { x = W - 20; y = 55 + Math.random() * (H - 75); }
-  monsters.push({ x, y, hp: 3, flash: 0 });
+  monsters.push({ x, y, hp: 3, flash: 0, spikeCooldown: 0 });
 }
 
 // ---------- update ----------
@@ -431,6 +467,23 @@ function update(dt) {
       hitCooldown = PLAYER_HIT_INVULN;
       addToast(`-${MONSTER_DAMAGE} 生命`, player.x, player.y - 40);
     }
+
+    // spikes damage monsters standing near a filled slot
+    if (m.spikeCooldown > 0) m.spikeCooldown -= dt;
+    for (const slot of spikeSlots) {
+      if (slot.filled && m.spikeCooldown <= 0 && dist(m.x, m.y, slot.x, slot.y) < SPIKE_RADIUS) {
+        m.hp -= SPIKE_DAMAGE;
+        m.flash = 0.15;
+        m.spikeCooldown = SPIKE_TICK;
+        break;
+      }
+    }
+  }
+  for (let i = monsters.length - 1; i >= 0; i--) {
+    if (monsters[i].hp <= 0) {
+      addToast('地刺杀死了怪物！', monsters[i].x, monsters[i].y - 30);
+      monsters.splice(i, 1);
+    }
   }
 
   // movement
@@ -509,8 +562,12 @@ function nearestInteractable() {
     return { x: spellbookItem.x, y: spellbookItem.y - 40, text: '[E] 拾取火球魔法书' };
   for (const f of fencePickups) if (!f.picked && dist(player.x, player.y, f.x, f.y) < INTERACT_RANGE)
     return { x: f.x, y: f.y - 40, text: '[E] 拾取围栏' };
+  for (const s of spikePickups) if (!s.picked && dist(player.x, player.y, s.x, s.y) < INTERACT_RANGE)
+    return { x: s.x, y: s.y - 40, text: '[E] 拾取地刺' };
   for (const slot of fenceSlots) if (!slot.filled && dist(player.x, player.y, slot.x, slot.y) < INTERACT_RANGE)
     return { x: slot.x, y: slot.y - 40, text: fenceCount > 0 ? '[E] 放置围栏' : '[E] 放置围栏 (无围栏)' };
+  for (const slot of spikeSlots) if (!slot.filled && dist(player.x, player.y, slot.x, slot.y) < INTERACT_RANGE)
+    return { x: slot.x, y: slot.y - 40, text: spikeCount > 0 ? '[E] 放置地刺' : '[E] 放置地刺 (无地刺)' };
   if (dist(player.x, player.y, campfire.x, campfire.y) < INTERACT_RANGE)
     return { x: campfire.x, y: campfire.y - 40, text: wood >= 2 ? '[E] 添柴 (需要2木材)' : '[E] 添柴 (木材不足)' };
   for (const t of trees) if (t.available && dist(player.x, player.y, t.x, t.y) < INTERACT_RANGE)
@@ -550,6 +607,8 @@ function render() {
   for (const m of medkits) if (m.available) drawResource('🩹', m.x, m.y, 30);
   // fence slots (draw before campfire so the fire sits on top visually)
   for (const slot of fenceSlots) if (slot.filled) drawResource('🚧', slot.x, slot.y, 28);
+  // spike slots
+  for (const slot of spikeSlots) if (slot.filled) drawResource('🔺', slot.x, slot.y, 26);
 
   // campfire
   drawResource(campfire.lit ? '🔥' : '🪵', campfire.x, campfire.y, 38);
@@ -562,6 +621,9 @@ function render() {
 
   // fence pickups
   for (const f of fencePickups) if (!f.picked) drawResource('🚧', f.x, f.y, 30);
+
+  // spike pickups
+  for (const s of spikePickups) if (!s.picked) drawResource('🔺', s.x, s.y, 28);
 
   // monsters
   for (const m of monsters) {
@@ -628,6 +690,7 @@ function render() {
   document.getElementById('weaponLabel').textContent = `武器: ${hasWeapon ? '已装备' : '未装备'}`;
   document.getElementById('fireballLabel').textContent = `火球魔法书: ${hasFireball ? '已获得' : '未获得'}`;
   document.getElementById('fenceLabel').textContent = `围栏: ${fenceCount}`;
+  document.getElementById('spikeLabel').textContent = `地刺: ${spikeCount}`;
 }
 
 // ---------- loop ----------
